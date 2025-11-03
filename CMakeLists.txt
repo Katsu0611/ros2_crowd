@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(s_turtlebot)
+project(animove)
 
 # Default to C99
 if(NOT CMAKE_C_STANDARD)
@@ -37,4 +37,8 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/crowd_flow_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 ament_package()
