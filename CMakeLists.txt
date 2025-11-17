@@ -41,4 +41,16 @@ install(PROGRAMS
   scripts/crowd_flow_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
+
+install(PROGRAMS
+  scripts/optical_flow_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  scripts/optical_flow_debug_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+
 ament_package()

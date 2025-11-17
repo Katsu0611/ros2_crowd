@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 群衆フロー検知 Launchファイル（完全版）
-CMakeLists.txtのインストール先に対応
-cmd_vel_joyから速度を取得
+setup.py不要、スクリプト直接実行方式
+パス自動検出機能付き
 """
 
 from launch import LaunchDescription
@@ -15,21 +15,21 @@ def find_script():
     """crowd_flow_node.pyを複数の場所から探す"""
     # 可能性のあるパスのリスト
     possible_paths = [
-        # CMakeLists.txtでインストールされる標準的な場所
-        Path.home() / 'animove_ws' / 'install' / 'animove' / 'lib' / 'animove' / 'crowd_flow_node.py',
         # ソースディレクトリから
         Path.home() / 'animove_ws' / 'src' / 'animove' / 'scripts' / 'crowd_flow_node.py',
-        # 手動でコピーした場所
+        # インストールディレクトリから
         Path.home() / 'animove_ws' / 'install' / 'animove' / 'share' / 'animove' / 'scripts' / 'crowd_flow_node.py',
+        # launchファイルの相対位置から
+        Path(__file__).parent.parent / 'scripts' / 'crowd_flow_node.py',
     ]
     
     for path in possible_paths:
         if path.exists():
-            print(f"[INFO] Found script at: {path}")
+            print(f"Found script at: {path}")
             return str(path)
     
     # 見つからない場合はエラーメッセージと最初のパスを返す
-    print(f"[ERROR] Script not found! Searched in:")
+    print(f"ERROR: Script not found! Searched in:")
     for path in possible_paths:
         print(f"  - {path}")
     return str(possible_paths[0])  # デフォルトとして最初のパスを返す
@@ -44,12 +44,6 @@ def generate_launch_description():
         'video_device',
         default_value='/dev/video2',
         description='ビデオデバイス番号'
-    )
-    
-    cmd_vel_topic_arg = DeclareLaunchArgument(
-        'cmd_vel_topic',
-        default_value='/cmd_vel_joy',
-        description='速度コマンドトピック名（例: /cmd_vel_joy, /cmd_vel）'
     )
     
     target_width_arg = DeclareLaunchArgument(
@@ -129,12 +123,21 @@ def generate_launch_description():
              '-p', 'camera_frame_id:=usb_cam',
              '-p', 'io_method:=mmap',
              '-p', 'framerate:=30.0',
-             '-p', 'camera_info_url:=',  # キャリブレーション警告を抑制
              '-r', '/usb_cam/image_raw:=/camera/image_raw',
              '-r', '/usb_cam/camera_info:=/camera/camera_info',
         ],
         output='screen',
         shell=False
+    )
+    
+    # === ダミーcmd_vel ===
+    static_cmd_vel = ExecuteProcess(
+        cmd=['ros2', 'topic', 'pub', '/cmd_vel', 
+             'geometry_msgs/msg/Twist', 
+             '{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}',
+             '--rate', '10'],
+        shell=False,
+        output='log'
     )
     
     # === 群流検知ノード（Pythonスクリプト直接実行）===
@@ -143,7 +146,7 @@ def generate_launch_description():
              '--ros-args',
              '-p', 'camera_topic:=/camera/image_raw',
              '-p', 'camera_info_topic:=/camera/camera_info',
-             '-p', ['cmd_vel_topic:=', LaunchConfiguration('cmd_vel_topic')],
+             '-p', 'cmd_vel_topic:=/cmd_vel',
              '-p', ['target_width:=', LaunchConfiguration('target_width')],
              '-p', ['use_yolo:=', LaunchConfiguration('use_yolo')],
              '-p', ['yolo_model:=', LaunchConfiguration('yolo_model')],
@@ -163,7 +166,6 @@ def generate_launch_description():
     return LaunchDescription([
         # 引数
         video_device_arg,
-        cmd_vel_topic_arg,
         target_width_arg,
         use_yolo_arg,
         yolo_model_arg,
@@ -178,5 +180,6 @@ def generate_launch_description():
         
         # プロセス
         usb_cam_node,
+        static_cmd_vel,
         crowd_flow_node,
     ])
