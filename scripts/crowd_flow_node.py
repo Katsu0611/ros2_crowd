@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """
-ROS2 群衆フロー検知ノード（完全版）
+ROS2 群衆フロー検知ノード（完全版・修正版）
 
-エゴモーション補償 + YOLOv8統合 + 軽量化最適化
-
-機能：
-- エゴモーション補償（移動ロボット対応）
-- YOLOv8による人物検出（オプション）
-- 群衆フローパターン検知
-- リアルタイム可視化
-- パフォーマンス最適化
+エゴモーション補償 + YOLOv8統合 + 軽量化最適化 + 支配的な方向への色合わせ
+ターミナルに人数と支配的な流れの方向を出力します。
 """
 
 import rclpy
@@ -48,13 +42,7 @@ class CameraParameters:
 
 
 class EgoMotionCompensator:
-    """
-    エゴモーション補償クラス
-    
-    ロボットの移動（前進・回転）によるオプティカルフローを
-    計算し、観測フローから減算することで、環境内の真の動き
-    （人の流れ）のみを抽出します。
-    """
+    """エゴモーション補償クラス"""
     
     def __init__(self, camera_params: CameraParameters):
         self.cam = camera_params
@@ -142,12 +130,7 @@ class EgoMotionCompensator:
 
 
 class CrowdFlowDetector:
-    """
-    群衆フロー検知クラス
-    
-    エゴモーション補償済みのオプティカルフローから、
-    群衆の流れパターンを検知します。
-    """
+    """群衆フロー検知クラス"""
     
     def __init__(self, grid_size=40, flow_threshold=1.5):
         self.grid_size = grid_size
@@ -155,16 +138,7 @@ class CrowdFlowDetector:
         self.flow_history = deque(maxlen=10)
         
     def detect_crowd_patterns(self, flow, person_mask=None):
-        """
-        群衆パターンを検知
-        
-        Args:
-            flow: エゴモーション補償済みのオプティカルフロー
-            person_mask: 人物領域のマスク（オプション）
-        
-        Returns:
-            dict: 検知結果（main_direction, congestion_areas, counter_flows）
-        """
+        """群衆パターンを検知"""
         # マスク適用（人物領域のみに限定）
         if person_mask is not None:
             masked_flow = flow.copy()
@@ -270,18 +244,11 @@ class CrowdFlowDetector:
     def _classify_direction(self, angle, magnitude):
         """
         角度と速度をロボット視点の5方向に分類
-        
-        Args:
-            angle: フローの角度（ラジアン）
-            magnitude: フローの大きさ
-        
-        Returns:
-            方向カテゴリー（停止/接近/離脱/左横切/右横切）
         """
         # 停止判定（flow_thresholdの半分以下は停止とみなす）
         STOP_THRESHOLD = self.flow_threshold * 0.5
         if magnitude < STOP_THRESHOLD:
-            return 'STOP'
+            return 'STATIC/NO_FLOW'
         
         # ラジアンから度に変換
         angle_deg = np.degrees(angle)
@@ -303,7 +270,7 @@ class CrowdFlowDetector:
         
         # 方向別の色設定（BGR）
         direction_colors = {
-            'STOP': (128, 128, 128),     # 灰色
+            'STATIC/NO_FLOW': (128, 128, 128), # 灰色
             'APPROACH': (0, 0, 255),     # 赤
             'RECEDE': (255, 0, 0),       # 青
             'RIGHT': (0, 255, 0),        # 緑
@@ -311,12 +278,10 @@ class CrowdFlowDetector:
         }
         
         # 主要な流れ（方向別の色付き矢印）
-        # 停止領域は表示しない
         for region in results['main_direction']:
             direction = region['direction']
             
-            # 停止している領域はスキップ（画面をすっきりさせる）
-            if direction == 'STOP':
+            if direction == 'STATIC/NO_FLOW':
                 continue
             
             x, y, w, h = region['bbox']
@@ -327,12 +292,12 @@ class CrowdFlowDetector:
             ey = int(cy + magnitude * np.sin(angle))
             
             # 方向に応じた色を取得
-            color = direction_colors.get(direction, (0, 255, 0))  # デフォルトは緑
+            color = direction_colors.get(direction, (0, 255, 0))
             
             # 矢印を描画
             cv2.arrowedLine(vis, (cx, cy), (ex, ey), color, 2, tipLength=0.3)
             
-            # 方向ラベルを描画（太字で見やすく）
+            # 方向ラベルを描画
             cv2.putText(vis, direction, (x, y-5),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         
@@ -359,7 +324,7 @@ class CrowdFlowNode(Node):
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         
         # 処理パラメータ
-        self.declare_parameter('target_width', 320)  # 軽量化のため320に
+        self.declare_parameter('target_width', 320)
         self.declare_parameter('angular_filter_alpha', 0.05)
         self.declare_parameter('motion_threshold', 1.0)
         
@@ -375,13 +340,13 @@ class CrowdFlowNode(Node):
         # 機能フラグ
         self.declare_parameter('enable_ego_compensation', True)
         self.declare_parameter('enable_visualization', True)
-        self.declare_parameter('person_threshold', 1)  # 最低人数
+        self.declare_parameter('person_threshold', 1)
         
-        # オプティカルフローパラメータ（軽量化）
+        # オプティカルフローパラメータ
         self.declare_parameter('flow_pyr_scale', 0.5)
         self.declare_parameter('flow_levels', 3)
-        self.declare_parameter('flow_winsize', 10)  # 15→10
-        self.declare_parameter('flow_iterations', 2)  # 3→2
+        self.declare_parameter('flow_winsize', 10)
+        self.declare_parameter('flow_iterations', 2)
 
         # === パラメータ取得 ===
         self.camera_topic = self.get_parameter('camera_topic').value
@@ -416,26 +381,15 @@ class CrowdFlowNode(Node):
         
         # YOLOv8初期化
         self.yolo_model = None
-        self.get_logger().info(f'YOLOv8初期化: use_yolo={self.use_yolo}, YOLO_AVAILABLE={YOLO_AVAILABLE}')
-        
-        if self.use_yolo:
-            if not YOLO_AVAILABLE:
-                self.get_logger().error('❌ ultralyticsがインストールされていません！')
-                self.get_logger().error('インストール: pip install ultralytics --break-system-packages')
-            else:
-                try:
-                    yolo_model_path = self.get_parameter('yolo_model').value
-                    self.get_logger().info(f'YOLOv8モデルをロード中: {yolo_model_path}')
-                    self.yolo_model = YOLO(yolo_model_path)
-                    self.yolo_confidence = self.get_parameter('yolo_confidence').value
-                    self.get_logger().info(f'✓ YOLOv8ロード成功（信頼度: {self.yolo_confidence}）')
-                except Exception as e:
-                    self.get_logger().error(f'❌ YOLOv8のロード失敗: {e}')
-                    import traceback
-                    self.get_logger().error(traceback.format_exc())
-                    self.yolo_model = None
-        else:
-            self.get_logger().info('YOLOv8は無効化されています')
+        if self.use_yolo and YOLO_AVAILABLE:
+            try:
+                yolo_model_path = self.get_parameter('yolo_model').value
+                self.yolo_model = YOLO(yolo_model_path)
+                self.yolo_confidence = self.get_parameter('yolo_confidence').value
+                self.get_logger().info('✓ YOLOv8ロード成功')
+            except Exception as e:
+                self.get_logger().error(f'❌ YOLOv8のロード失敗: {e}')
+                self.yolo_model = None
         
         # QoS設定
         qos_reliable = QoSProfile(
@@ -480,13 +434,7 @@ class CrowdFlowNode(Node):
         
         # 起動ログ
         self.get_logger().info('=' * 50)
-        self.get_logger().info('群衆フロー検知ノード起動（完全版）')
-        self.get_logger().info(f'解像度: {self.target_width}x???')
-        self.get_logger().info(f'エゴモーション補償: {self.enable_ego_compensation}')
-        self.get_logger().info(f'YOLOv8: {self.use_yolo and self.yolo_model is not None}')
-        self.get_logger().info(f'グリッドサイズ: {self.grid_size}')
-        self.get_logger().info(f'フロー閾値: {self.flow_threshold}')
-        self.get_logger().info(f'人数閾値: {self.person_threshold}')
+        self.get_logger().info('群衆フロー検知ノード起動')
         self.get_logger().info('=' * 50)
 
     def camera_info_callback(self, msg: CameraInfo):
@@ -516,10 +464,9 @@ class CrowdFlowNode(Node):
         current_time = self.get_clock().now()
         
         try:
-            # 画像取得
             cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             
-            # リサイズ（軽量化）
+            # リサイズ
             h, w = cv_image.shape[:2]
             size_changed = False
             if w != self.camera_params.width:
@@ -528,7 +475,7 @@ class CrowdFlowNode(Node):
                 if abs(target_h - self.camera_params.height) > 1:
                     self.camera_params.height = target_h
                     self.compensator.update_camera_parameters(self.camera_params)
-                    size_changed = True  # サイズ変更フラグ
+                    size_changed = True
                 cv_image = cv2.resize(
                     cv_image,
                     (self.camera_params.width, self.camera_params.height)
@@ -536,27 +483,18 @@ class CrowdFlowNode(Node):
             
             curr_gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
 
-            # 初期化 または サイズ変更時
-            if self.prev_gray is None or self.prev_time is None or size_changed:
-                self.prev_gray = curr_gray
-                self.prev_time = current_time
-                return
-            
-            # サイズ一致確認（安全チェック）
-            if self.prev_gray.shape != curr_gray.shape:
+            if self.prev_gray is None or self.prev_time is None or size_changed or self.prev_gray.shape != curr_gray.shape:
                 self.prev_gray = curr_gray
                 self.prev_time = current_time
                 return
 
-            # 時間差分計算
             try:
                 dt = (current_time.nanoseconds - self.prev_time.nanoseconds) / 1e9
-                if dt <= 0.001:
-                    return
+                if dt <= 0.001: return
             except Exception:
-                dt = 0.03  # フォールバック
+                dt = 0.03
 
-            # === オプティカルフロー計算（軽量化パラメータ）===
+            # === オプティカルフロー計算 ===
             flow = cv2.calcOpticalFlowFarneback(
                 self.prev_gray, curr_gray, None,
                 pyr_scale=self.flow_pyr_scale,
@@ -575,12 +513,8 @@ class CrowdFlowNode(Node):
                     self.compensated_angular_z * (1.0 - alpha) +
                     self.angular_z * alpha
                 )
-                
                 residual_flow = self.compensator.compensate_flow(
-                    flow,
-                    self.linear_x,
-                    self.compensated_angular_z,
-                    dt
+                    flow, self.linear_x, self.compensated_angular_z, dt
                 )
             else:
                 residual_flow = flow
@@ -607,11 +541,6 @@ class CrowdFlowNode(Node):
                             person_mask[y1:y2, x1:x2] = True
                             yolo_boxes.append((x1, y1, x2, y2, float(box.conf)))
                             person_count += 1
-                    
-                    # デバッグログ（5秒に1回）
-                    if self.frame_count % 150 == 0 and person_count > 0:
-                        self.get_logger().info(f'👤 検出人数: {person_count}')
-                
                 except Exception as e:
                     if self.frame_count % 150 == 0:
                         self.get_logger().error(f'YOLO検出エラー: {e}')
@@ -619,45 +548,73 @@ class CrowdFlowNode(Node):
             # === 群衆パターン検知 ===
             if person_count >= self.person_threshold or not self.use_yolo:
                 results = self.crowd_detector.detect_crowd_patterns(
-                    residual_flow,
-                    person_mask
+                    residual_flow, person_mask
                 )
             else:
-                # 人数が閾値未満の場合は空の結果
                 results = {
                     'main_direction': [],
                     'congestion_areas': [],
                     'counter_flows': []
                 }
+
+            # === 支配的なフロー方向の計算 ===
+            dominant_angle_hsv = None
+            dominant_direction_label = 'STATIC/NO_FLOW'
             
+            if person_mask is not None and person_count > 0:
+                person_flow_x = residual_flow[person_mask, 0]
+                person_flow_y = residual_flow[person_mask, 1]
+                
+                if person_flow_x.size > 0:
+                    avg_flow_x = np.mean(person_flow_x)
+                    avg_flow_y = np.mean(person_flow_y)
+                    
+                    magnitude = np.linalg.norm([avg_flow_x, avg_flow_y])
+                    if magnitude > self.flow_threshold * 0.5:
+                        dominant_angle = np.arctan2(avg_flow_y, avg_flow_x)
+                        
+                        # 支配的な方向ラベルの決定
+                        dominant_direction_label = self.crowd_detector._classify_direction(
+                            dominant_angle, magnitude
+                        )
+                        
+                        dominant_angle_hsv = (dominant_angle * 180 / np.pi / 2) % 180
+            
+            # === ターミナルログ出力（追加機能）===
+            # 約1秒に1回ログ出力
+            if self.frame_count % 30 == 0: 
+                log_msg = f'👥 人数: {person_count} | ➡️ 支配的な流れ: {dominant_direction_label}'
+                self.get_logger().info(log_msg)
+            # ==================================
+
             # === 可視化 ===
             if self.enable_visualization:
-                vis_frame = self.crowd_detector.visualize_results(cv_image, results)
-                
-                # YOLOバウンディングボックス描画（シンプル版）
+                # 左側：生の画像（YOLOボックス付き）
+                left_frame = cv_image.copy()
                 for x1, y1, x2, y2, conf in yolo_boxes:
-                    cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.rectangle(left_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 
-                # 人物マスク（半透明）- コメントアウト（見づらいため）
-                # if person_mask is not None and np.any(person_mask):
-                #     mask_overlay = np.zeros_like(cv_image)
-                #     mask_overlay[person_mask] = [255, 255, 0]
-                #     vis_frame = cv2.addWeighted(vis_frame, 0.85, mask_overlay, 0.15, 0)
+                # 右側：HSVフロー可視化（支配的な方向に色を合わせる）
+                right_frame = self._create_hsv_flow_visualization(
+                    residual_flow, 
+                    person_mask,
+                    cv_image.shape[:2],
+                    dominant_angle_hsv
+                )
                 
-                # ステータス表示（コメントアウト）
+                vis_results = self.crowd_detector.visualize_results(right_frame, results)
+                
+                # FPS表示
                 self.fps = self.update_fps()
-                # status_text = f'FPS: {self.fps:.1f} | Vz={self.linear_x:.2f} Wz={self.compensated_angular_z:.2f}'
-                # if person_count > 0:
-                #     status_text += f' | Persons: {person_count}'
-                # 
-                # cv2.putText(
-                #     vis_frame, status_text, (10, 30),
-                #     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2
-                # )
+                fps_text = f'FPS: {self.fps:.1f} | Persons: {person_count}'
+                cv2.putText(left_frame, fps_text, (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(vis_results, 'Direction Flow', (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 
-                cv2.imshow(self.WINDOW_NAME, vis_frame)
+                combined_frame = np.hstack([left_frame, vis_results])
+                cv2.imshow(self.WINDOW_NAME, combined_frame)
             
-            # キー入力処理
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or key == ord('Q'):
                 raise KeyboardInterrupt
@@ -671,6 +628,36 @@ class CrowdFlowNode(Node):
             self.get_logger().error(f'image_callback エラー: {e}')
             import traceback
             traceback.print_exc()
+    
+    def _create_hsv_flow_visualization(self, flow, person_mask, image_shape, dominant_angle_hsv=None):
+        """HSV形式で光学フローを可視化（人物領域のみ、支配的な方向に色を合わせる）"""
+        h, w = image_shape
+        hsv = np.zeros((h, w, 3), dtype=np.uint8)
+        hsv[..., 1] = 255
+        
+        mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        base_hue = ang * 180 / np.pi / 2
+        
+        # 支配的な方向に色を合わせる（色相シフト）
+        if dominant_angle_hsv is not None:
+            # 支配的な角度を中央（90度）に合わせる
+            hue_offset = dominant_angle_hsv - 90 
+            hsv[..., 0] = (base_hue - hue_offset) % 180
+        else:
+            hsv[..., 0] = base_hue
+            
+        # Value（明度）：フローの大きさを明るさで表現
+        hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+        
+        bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        
+        # 人物マスクがある場合、人物領域のみ表示
+        if person_mask is not None:
+            masked_bgr = np.zeros_like(bgr)
+            masked_bgr[person_mask] = bgr[person_mask]
+            return masked_bgr
+        else:
+            return bgr
     
     def update_fps(self):
         """FPS計算"""
