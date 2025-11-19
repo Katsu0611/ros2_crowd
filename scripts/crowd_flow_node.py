@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-ROS2 群衆フロー検知ノード（完全版・修正版）
+ROS2 群衆フロー検知ノード（完全版・修正版v5）
 
-エゴモーション補償 + YOLOv8統合 + 軽量化最適化 + 支配的な方向への色合わせ
-ターミナルに人数と支配的な流れの方向を出力します。
+修正点:
+1. 矢印(ベクトル)の描画を完全に削除しました（左側にも右側にも表示しません）。
+2. HSVフローの明度ブースト(Boosted HSV)を削除し、元の自然な明度計算に戻しました。
+   (支配的な方向への色合わせ機能は維持しています)
 """
 
 import rclpy
@@ -179,7 +181,7 @@ class CrowdFlowDetector:
                 direction = self._classify_direction(angle, magnitude)
                 
                 # 有意な動きがある領域のみ記録（停止は除外）
-                if direction != 'STOP':
+                if direction != 'STATIC/NO_FLOW':
                     regions.append({
                         'bbox': (x, y, self.grid_size, self.grid_size),
                         'magnitude': magnitude,
@@ -263,51 +265,6 @@ class CrowdFlowDetector:
             return 'RECEDE'  # 離脱
         else:
             return 'LEFT'  # 左横切
-    
-    def visualize_results(self, frame, results):
-        """検知結果を可視化"""
-        vis = frame.copy()
-        
-        # 方向別の色設定（BGR）
-        direction_colors = {
-            'STATIC/NO_FLOW': (128, 128, 128), # 灰色
-            'APPROACH': (0, 0, 255),     # 赤
-            'RECEDE': (255, 0, 0),       # 青
-            'RIGHT': (0, 255, 0),        # 緑
-            'LEFT': (0, 255, 255),       # 黄色
-        }
-        
-        # 主要な流れ（方向別の色付き矢印）
-        for region in results['main_direction']:
-            direction = region['direction']
-            
-            if direction == 'STATIC/NO_FLOW':
-                continue
-            
-            x, y, w, h = region['bbox']
-            cx, cy = x + w//2, y + h//2
-            magnitude = min(region['magnitude'] * 10, 50)  # 矢印の長さを制限
-            angle = region['angle']
-            ex = int(cx + magnitude * np.cos(angle))
-            ey = int(cy + magnitude * np.sin(angle))
-            
-            # 方向に応じた色を取得
-            color = direction_colors.get(direction, (0, 255, 0))
-            
-            # 矢印を描画
-            cv2.arrowedLine(vis, (cx, cy), (ex, ey), color, 2, tipLength=0.3)
-            
-            # 方向ラベルを描画
-            cv2.putText(vis, direction, (x, y-5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        
-        # 混雑エリア（オレンジの矩形）
-        for x, y, w, h in results['congestion_areas']:
-            cv2.rectangle(vis, (x, y), (x+w, y+h), (0, 165, 255), 2)
-            cv2.putText(vis, "Congestion", (x, y-5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
-        
-        return vis
 
 
 class CrowdFlowNode(Node):
@@ -594,7 +551,9 @@ class CrowdFlowNode(Node):
                 for x1, y1, x2, y2, conf in yolo_boxes:
                     cv2.rectangle(left_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 
-                # 右側：HSVフロー可視化（支配的な方向に色を合わせる）
+                # 矢印表示の削除（visualize_resultsの呼び出しを削除）
+                
+                # 右側：HSVフロー可視化（支配的な方向に色を合わせる、ブーストなし）
                 right_frame = self._create_hsv_flow_visualization(
                     residual_flow, 
                     person_mask,
@@ -602,17 +561,16 @@ class CrowdFlowNode(Node):
                     dominant_angle_hsv
                 )
                 
-                vis_results = self.crowd_detector.visualize_results(right_frame, results)
-                
                 # FPS表示
                 self.fps = self.update_fps()
                 fps_text = f'FPS: {self.fps:.1f} | Persons: {person_count}'
                 cv2.putText(left_frame, fps_text, (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(vis_results, 'Direction Flow', (10, 30),
+                
+                cv2.putText(right_frame, 'Direction Flow (HSV)', (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 
-                combined_frame = np.hstack([left_frame, vis_results])
+                combined_frame = np.hstack([left_frame, right_frame])
                 cv2.imshow(self.WINDOW_NAME, combined_frame)
             
             key = cv2.waitKey(1) & 0xFF
@@ -646,7 +604,7 @@ class CrowdFlowNode(Node):
         else:
             hsv[..., 0] = base_hue
             
-        # Value（明度）：フローの大きさを明るさで表現
+        # Value（明度）：元の計算に戻す（ブースト削除）
         hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
         
         bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
